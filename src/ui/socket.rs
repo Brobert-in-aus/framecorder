@@ -8,6 +8,9 @@
 //! - `clip`: save the clip buffer, the same as the tab's clip button
 //! - `record`: start a recording, if one isn't going
 //! - `stop`: stop the recording, if one is
+//! - `settings`: the status plus `"settings"`, as ui.conf spells them
+//! - `set <key>=<value>`: change one, as ui.conf spells it (`set clip=60`,
+//!   `set shape=square`, `set mic=false`), and save it like a tap in the tab
 //!
 //! Every reply is the status after the command, plus `"ok"` and, when it
 //! couldn't, `"error"`. Commands run on the tab's own loop, through the same

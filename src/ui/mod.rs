@@ -566,14 +566,40 @@ impl App {
                 Ok(())
             }
             "stop" => Err("Not recording".to_string()),
-            _ => Err("Unknown command: status, clip, record or stop".to_string()),
+            "settings" => Ok(()),
+            _ if command.starts_with("set ") => self.remote_set(&command[4..]),
+            _ => Err("Unknown command: status, clip, record, stop, settings or set <key>=<value>".to_string()),
         };
         let mut reply = self.status();
+        if command == "settings" || command.starts_with("set ") {
+            reply["settings"] = self.settings.values();
+        }
         reply["ok"] = result.is_ok().into();
         if let Err(why) = result {
             reply["error"] = why.into();
         }
         reply.to_string()
+    }
+
+    /// `set key=value` from the control socket: one setting, ui.conf's way,
+    /// saved like a tap in the settings. A recorder whose settings changed
+    /// restarts once nothing's being recorded (manage_recorder).
+    fn remote_set(&mut self, pair: &str) -> Result<(), String> {
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err("set needs key=value".to_string());
+        };
+        let (key, value) = (key.trim(), value.trim());
+        let mut changed = self.settings;
+        if key == "onboarded" || !changed.apply(key, value) {
+            return Err(format!("Can't set {key} to {value}"));
+        }
+        self.settings = changed;
+        self.retry_at = None;
+        if !self.settings.save() {
+            return Err("Couldn't save the settings".to_string());
+        }
+        log::info!("{key} set to {value} over the control socket");
+        Ok(())
     }
 
     /// What the control socket reports.

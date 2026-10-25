@@ -96,34 +96,49 @@ impl Settings {
         let mut s = Self { onboarded: true, ..Self::default() };
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else { continue };
-            match (key.trim(), value.trim()) {
-                ("shape", "wide") => s.shape = Shape::Wide,
-                ("shape", "square") => s.shape = Shape::Square,
-                ("shape", "tall") => s.shape = Shape::Tall,
-                ("shape", "both") => s.shape = Shape::BothEyes,
-                ("eye", "left") => s.eye = Eye::Left,
-                ("eye", "right") => s.eye = Eye::Right,
-                ("quality", "standard") => s.quality = Quality::Standard,
-                ("quality", "high") => s.quality = Quality::High,
-                ("quality", "max") => s.quality = Quality::Max,
-                ("fps", "auto") => s.fps = FrameRate::Auto,
-                ("fps", "60") => s.fps = FrameRate::Sixty,
-                ("fps", "30") => s.fps = FrameRate::Thirty,
-                ("game_audio", v) => s.game_audio = v == "true",
-                ("mic", v) => s.mic = v == "true",
-                ("clips", v) => s.clips = v == "true",
-                ("onboarded", v) => s.onboarded = v == "true",
-                // Older configs turned clips off with the length.
-                ("clip", "off") => s.clips = false,
-                ("clip", v) => {
-                    if let Some(secs) = v.parse().ok().filter(|n| CLIP_LENGTHS.contains(n)) {
-                        s.clip_secs = secs;
-                    }
-                }
-                _ => {}
-            }
+            s.apply(key.trim(), value.trim());
         }
         s
+    }
+
+    /// Sets one value the way ui.conf spells it (`shape=square`, `clip=60`);
+    /// false when that isn't one. The control socket's `set` uses this too.
+    pub fn apply(&mut self, key: &str, value: &str) -> bool {
+        let s = self;
+        match (key, value) {
+            ("shape", "wide") => s.shape = Shape::Wide,
+            ("shape", "square") => s.shape = Shape::Square,
+            ("shape", "tall") => s.shape = Shape::Tall,
+            ("shape", "both") => s.shape = Shape::BothEyes,
+            ("eye", "left") => s.eye = Eye::Left,
+            ("eye", "right") => s.eye = Eye::Right,
+            ("quality", "standard") => s.quality = Quality::Standard,
+            ("quality", "high") => s.quality = Quality::High,
+            ("quality", "max") => s.quality = Quality::Max,
+            ("fps", "auto") => s.fps = FrameRate::Auto,
+            ("fps", "60") => s.fps = FrameRate::Sixty,
+            ("fps", "30") => s.fps = FrameRate::Thirty,
+            ("game_audio", v) => s.game_audio = v == "true",
+            ("mic", v) => s.mic = v == "true",
+            ("clips", v) => s.clips = v == "true",
+            ("onboarded", v) => s.onboarded = v == "true",
+            // Older configs turned clips off with the length.
+            ("clip", "off") => s.clips = false,
+            ("clip", v) => match v.parse().ok().filter(|n| CLIP_LENGTHS.contains(n)) {
+                Some(secs) => s.clip_secs = secs,
+                None => return false,
+            },
+            _ => return false,
+        }
+        true
+    }
+
+    /// The settings as ui.conf spells them, `{"shape": "wide", "clip": "30", ...}`,
+    /// for the control socket.
+    pub fn values(&self) -> serde_json::Value {
+        let text = self.text();
+        let map = text.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.into()));
+        serde_json::Value::Object(map.collect())
     }
 
     /// Returns whether it got written.
