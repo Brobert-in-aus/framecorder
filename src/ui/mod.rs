@@ -9,6 +9,7 @@ mod pairing;
 mod paint;
 mod recorder;
 mod settings;
+mod socket;
 mod text;
 mod texture;
 mod view;
@@ -269,6 +270,7 @@ pub fn run() -> Result<()> {
         relocked: crate::setup::relocked(),
     };
     log::info!("dashboard tab ready");
+    let control = socket::listen().map_err(|e| log::warn!("no control socket: {e:#}")).ok();
 
     while !QUIT.load(Ordering::Relaxed) {
         if SHOW.swap(false, Ordering::SeqCst) {
@@ -280,7 +282,13 @@ pub fn run() -> Result<()> {
             }
         }
         if input.as_ref().is_some_and(|i| i.clip_pressed()) {
-            app.clip("keybind");
+            let _ = app.clip("keybind");
+        }
+        if let Some(requests) = &control {
+            while let Ok(request) = requests.try_recv() {
+                let reply = app.remote(&request.command);
+                let _ = request.reply.send(reply);
+            }
         }
         // On the Frame the dashboard counts as open the whole time you're in
         // the home space, so our own tab being on screen is what matters.
@@ -408,7 +416,10 @@ impl App {
         match action {
             Action::TurnOff => return self.turn_off(),
             Action::Record => return self.toggle_recording(),
-            Action::ClipNow => return self.clip("tab button"),
+            Action::ClipNow => {
+                let _ = self.clip("tab button");
+                return;
+            }
             Action::Open(section) => return self.go(Screen::Settings(section)),
             Action::Close => return self.go(Screen::Home),
             Action::Step(step) => return self.go(Screen::Onboarding(step)),
@@ -506,25 +517,78 @@ impl App {
         }
     }
 
-    fn clip(&mut self, from: &str) {
+    /// Err says why not (and a toast says it in the headset).
+    fn clip(&mut self, from: &str) -> Result<(), String> {
         if self.clipped_at.is_some_and(|t| t.elapsed() < CLIP_COOLDOWN) {
-            return;
+            return Err("Clipped a moment ago".into());
         }
         if !self.settings.onboarded {
-            self.toast = Some(("Finish setting up in the framecorder tab first".into(), false));
-            return;
+            let why = "Finish setting up in the framecorder tab first";
+            self.toast = Some((why.into(), false));
+            return Err(why.into());
         }
         log::info!("clip asked for by the {from}");
         match &mut self.recorder {
             Some(r) if r.replay.is_some() && !r.quitting() => {
                 r.clip();
                 self.clipped_at = Some(Instant::now());
+                Ok(())
             }
             _ => {
                 let why = if self.settings.clipping().is_some() { "Clipping is starting up" } else { "Clipping is off" };
                 self.toast = Some((why.into(), false));
+                Err(why.into())
             }
         }
+    }
+
+    /// A command from the control socket (socket.rs), run through the same
+    /// code as the tab's buttons. Returns the JSON reply: the status after it,
+    /// with ok, and error when it couldn't.
+    fn remote(&mut self, command: &str) -> String {
+        self.dirty = true;
+        let recording = self.recording.as_ref().is_some_and(|r| !r.stopping);
+        let result = match command {
+            "status" => Ok(()),
+            "clip" => self.clip("control socket"),
+            "record" if recording => Err("Already recording".to_string()),
+            "record" if !self.settings.onboarded => Err("Finish setting up in the framecorder tab first".to_string()),
+            "record" => {
+                self.toggle_recording();
+                match (&self.recording, &self.note) {
+                    (Some(_), _) => Ok(()),
+                    (None, Some((why, false))) => Err(why.clone()),
+                    (None, _) => Err("Couldn't start recording".to_string()),
+                }
+            }
+            "stop" if recording => {
+                self.toggle_recording();
+                Ok(())
+            }
+            "stop" => Err("Not recording".to_string()),
+            _ => Err("Unknown command: status, clip, record or stop".to_string()),
+        };
+        let mut reply = self.status();
+        reply["ok"] = result.is_ok().into();
+        if let Err(why) = result {
+            reply["error"] = why.into();
+        }
+        reply.to_string()
+    }
+
+    /// What the control socket reports.
+    fn status(&self) -> serde_json::Value {
+        let running = self.recorder.as_ref().is_some_and(|r| !r.quitting());
+        serde_json::json!({
+            "onboarded": self.settings.onboarded,
+            "recorder": running,
+            "clipping": self.recorder.as_ref().filter(|_| running).and_then(|r| r.replay),
+            "recording": self.recording.as_ref().is_some_and(|r| !r.stopping),
+            "stopping": self.recording.as_ref().is_some_and(|r| r.stopping),
+            "recorded_secs": self.recording.as_ref().map(|r| r.recorded().as_secs_f64()),
+            "paused": self.recorder.as_ref().is_some_and(|r| r.paused()),
+            "note": self.note.as_ref().map(|(text, _)| text.as_str()),
+        })
     }
 
     /// Keeps a recorder running while clipping is on, restarts it when its
